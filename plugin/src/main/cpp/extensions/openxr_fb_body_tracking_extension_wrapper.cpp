@@ -313,27 +313,49 @@ void OpenXRFbBodyTrackingExtensionWrapper::_on_process() {
 	// - Adjusting the left and right shoulder back so they are aligned
 	//   with how models are designed, rather than the Meta positions of
 	//   the tips of the clavicles.
+
 	if (locations.isActive) {
+		// Construct the root under the hips pointing forwards
+		// IE, +z aligns with hips & user's real-world forward.
+		// (Remaining, however, on the XRorigin / Global XZ plane; root's basis rotated around Y to fit)
+
 		// Get the hips transform
 		Transform3D hips = xr_body_tracker->get_joint_transform(XRBodyTracker::JOINT_HIPS);
 
-		// Construct the root under the hips pointing forwards
 		Vector3 root_y = Vector3(0.0, 1.0, 0.0);
-		Vector3 root_z = -hips.basis[Vector3::AXIS_X].cross(root_y);
-		Vector3 root_x = root_y.cross(root_z);
+		Basis hips_basis = hips.basis;
+		float hips_left_x = hips_basis[0][0];
+		float hips_left_y = hips_basis[1][0];
+		float hips_left_z = hips_basis[2][0];
+
+		Vector3 hips_left = Vector3(hips_left_x, hips_left_y, hips_left_z).normalized();
+
+		Vector3 root_x = (hips_left.slide(Vector3(0.0, 1.0, 0.0))).normalized();
+		// flatten hips' left (x basis) on to real-world / global ground plane. Normalize.
+		Vector3 root_z = root_x.cross(root_y);
+
 		Vector3 root_o = hips.origin.slide(Vector3(0.0, 1.0, 0.0));
+		// flatten hips' origin on to ground plane.
+
 		Transform3D root = Transform3D(root_x, root_y, root_z, root_o).orthonormalized();
 		xr_body_tracker->set_joint_transform(XRBodyTracker::JOINT_ROOT, root);
-        xr_body_tracker->set_pose("default", root, Vector3(), Vector3(), XRPose::XR_TRACKING_CONFIDENCE_HIGH);
 
 		// Distance in meters to push the shoulder joints back from the
 		// clavicle-position to be in-line with the upper arm joints as
 		// required for T-Pose designed models.
 		constexpr float shoulder_z_offset = -0.07;
 
-		// Deduce the shoulder offset from the upper chest transform
+		// Get the upper_chest transform
 		Transform3D upper_chest = xr_body_tracker->get_joint_transform(XRBodyTracker::JOINT_UPPER_CHEST);
-		Vector3 shoulder_offset = upper_chest.basis[2] * shoulder_z_offset;
+
+		// Deduce the shoulder offset from the upper chest transform
+		Basis upper_chest_basis = upper_chest.basis;
+		float upper_chest_fwd_x = upper_chest_basis[0][2];
+		float upper_chest_fwd_y = upper_chest_basis[1][2];
+		float upper_chest_fwd_z = upper_chest_basis[2][2];
+
+		Vector3 upper_chest_fwd = Vector3(upper_chest_fwd_x, upper_chest_fwd_y, upper_chest_fwd_z).normalized();
+		Vector3 shoulder_offset = shoulder_z_offset * upper_chest_fwd;
 
 		// Correct the left shoulder
 		Transform3D left_shoulder = xr_body_tracker->get_joint_transform(XRBodyTracker::JOINT_LEFT_SHOULDER);
@@ -344,6 +366,9 @@ void OpenXRFbBodyTrackingExtensionWrapper::_on_process() {
 		Transform3D right_shoulder = xr_body_tracker->get_joint_transform(XRBodyTracker::JOINT_RIGHT_SHOULDER);
 		right_shoulder.origin += shoulder_offset;
 		xr_body_tracker->set_joint_transform(XRBodyTracker::JOINT_RIGHT_SHOULDER, right_shoulder);
+		
+		// Set tracker pose, velocities, confidence. Good to go.
+		xr_body_tracker->set_pose("default", root, Vector3(), Vector3(), XRPose::XR_TRACKING_CONFIDENCE_HIGH);
 	}
 
 	// Register the XRBodyTracker if necessary
