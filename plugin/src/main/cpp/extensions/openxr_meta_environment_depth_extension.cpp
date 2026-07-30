@@ -756,7 +756,7 @@ bool OpenXRMetaEnvironmentDepthExtension::_create_depth_provider_rt() {
 					RenderingDevice::TEXTURE_TYPE_2D_ARRAY,
 					RenderingDevice::DATA_FORMAT_D16_UNORM,
 					RenderingDevice::TEXTURE_SAMPLES_1,
-					RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+					RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | RenderingDevice::TEXTURE_USAGE_CAN_COPY_FROM_BIT,
 					reinterpret_cast<uint64_t>(image.image),
 					swapchain_state.width,
 					swapchain_state.height,
