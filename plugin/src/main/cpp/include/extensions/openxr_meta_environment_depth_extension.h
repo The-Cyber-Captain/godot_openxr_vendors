@@ -29,6 +29,8 @@
 
 #pragma once
 
+#include <mutex>
+
 #include <openxr/openxr.h>
 #include <godot_cpp/classes/array_mesh.hpp>
 #include <godot_cpp/classes/open_xr_extension_wrapper.hpp>
@@ -89,6 +91,9 @@ public:
 	bool get_reprojection_bilinear_filtering() const;
 
 	void get_environment_depth_map_async(const Callable &p_callback);
+	Dictionary get_environment_depth_gpu_copy_capabilities();
+	int64_t request_environment_depth_gpu_copy(const RID &p_destination_texture_rid, const Callable &p_callback);
+	bool cancel_environment_depth_gpu_copy(int64_t p_request_id);
 
 	void setup_global_uniforms();
 
@@ -173,6 +178,15 @@ private:
 		bool completed_layers[2] = { false, false };
 	};
 
+	static constexpr uint32_t ENVIRONMENT_DEPTH_ARRAY_LAYER_COUNT = 2;
+	static constexpr uint32_t MAXIMUM_PENDING_GPU_COPY_REQUESTS = 8;
+
+	struct GpuCopyRequest {
+		int64_t request_id = 0;
+		RID destination_texture;
+		Callable callback;
+	};
+
 	struct {
 		XrEnvironmentDepthProviderMETA depth_provider = XR_NULL_HANDLE;
 		XrEnvironmentDepthSwapchainMETA depth_swapchain = XR_NULL_HANDLE;
@@ -184,7 +198,15 @@ private:
 		LocalVector<Callable> depth_map_callbacks;
 		HashMap<int64_t, DepthMapReadbackRequest> depth_map_readback_requests;
 		int64_t next_depth_map_readback_request_id = 1;
+		XrTime last_delivered_gpu_copy_capture_time = 0;
 	} render_state;
+
+	mutable std::mutex gpu_copy_mutex;
+	LocalVector<GpuCopyRequest> gpu_copy_requests;
+	Size2i gpu_copy_image_size;
+	bool gpu_copy_source_accepting_requests = false;
+	int64_t next_gpu_copy_request_id = 1;
+	uint32_t environment_depth_extension_version = 0;
 
 	bool depth_provider_started = false;
 	bool hand_removal_enabled = false;
@@ -209,6 +231,9 @@ private:
 	void _request_depth_map_readback_rt(const RID &p_texture, const Array &p_callback_data);
 	void _on_depth_map_data_received(const PackedByteArray &p_data, int64_t p_request_id, int32_t p_layer);
 	void _dispatch_depth_map_callbacks(const LocalVector<Callable> &p_callbacks, const Array &p_callback_data);
+	void _process_environment_depth_gpu_copy_rt(const RID &p_source_texture, const Array &p_views, float p_near_z, float p_far_z, XrTime p_projection_display_time, XrTime p_source_capture_time, bool p_source_capture_time_available);
+	void _resolve_pending_gpu_copy_requests(const StringName &p_status, const String &p_error_message);
+	uint32_t _query_environment_depth_extension_version();
 
 	bool _create_depth_provider_rt();
 	void _destroy_depth_provider_rt();

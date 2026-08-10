@@ -61,6 +61,7 @@
         "PopupMenu",
         "PrimitiveMesh",
         "ProjectSettings",
+        "RDTextureFormat",
         "RefCounted",
         "RenderingDevice",
         "RenderingServer",
