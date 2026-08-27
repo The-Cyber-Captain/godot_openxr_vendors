@@ -29,6 +29,9 @@
 
 #include "extensions/openxr_meta_environment_depth_extension.h"
 
+#include <cstring>
+#include <limits>
+
 #ifdef ANDROID_ENABLED
 #define XR_USE_PLATFORM_ANDROID
 #define XR_USE_GRAPHICS_API_OPENGL_ES
@@ -46,14 +49,17 @@
 
 #include <godot_cpp/classes/camera3d.hpp>
 #include <godot_cpp/classes/engine.hpp>
+#include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/open_xrapi_extension.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
+#include <godot_cpp/classes/rd_texture_format.hpp>
 #include <godot_cpp/classes/rendering_device.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/window.hpp>
 #include <godot_cpp/classes/xr_interface.hpp>
 #include <godot_cpp/classes/xr_server.hpp>
 #include <godot_cpp/templates/vector.hpp>
+#include <godot_cpp/variant/packed_float32_array.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
 using namespace godot;
@@ -189,6 +195,9 @@ void OpenXRMetaEnvironmentDepthExtension::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_hand_removal_enabled"), &OpenXRMetaEnvironmentDepthExtension::get_hand_removal_enabled);
 
 	ClassDB::bind_method(D_METHOD("get_environment_depth_map_async", "callback"), &OpenXRMetaEnvironmentDepthExtension::get_environment_depth_map_async);
+	ClassDB::bind_method(D_METHOD("get_environment_depth_gpu_copy_capabilities"), &OpenXRMetaEnvironmentDepthExtension::get_environment_depth_gpu_copy_capabilities);
+	ClassDB::bind_method(D_METHOD("request_environment_depth_gpu_copy", "destination_texture_rid", "callback"), &OpenXRMetaEnvironmentDepthExtension::request_environment_depth_gpu_copy);
+	ClassDB::bind_method(D_METHOD("cancel_environment_depth_gpu_copy", "request_id"), &OpenXRMetaEnvironmentDepthExtension::cancel_environment_depth_gpu_copy);
 
 	ADD_SIGNAL(MethodInfo("openxr_meta_environment_depth_started"));
 	ADD_SIGNAL(MethodInfo("openxr_meta_environment_depth_stopped"));
@@ -204,6 +213,8 @@ Dictionary OpenXRMetaEnvironmentDepthExtension::_get_requested_extensions(uint64
 }
 
 void OpenXRMetaEnvironmentDepthExtension::_on_instance_created(uint64_t instance) {
+	environment_depth_extension_version = _query_environment_depth_extension_version();
+
 	if (meta_environment_depth_ext) {
 		bool result = initialize_meta_environment_depth_extension((XrInstance)instance);
 		if (!result) {
@@ -257,9 +268,24 @@ void OpenXRMetaEnvironmentDepthExtension::_on_pre_render() {
 		openxr_api->get_predicted_display_time(),
 	};
 
+	XrTime source_capture_time = 0;
+	bool source_capture_time_available = false;
+#if XR_META_environment_depth_SPEC_VERSION >= 2
+	XrEnvironmentDepthImageTimestampMETA depth_image_timestamp = {
+		XR_TYPE_ENVIRONMENT_DEPTH_IMAGE_TIMESTAMP_META, // type
+		nullptr, // next
+		0, // captureTime
+	};
+	bool request_capture_time = environment_depth_extension_version >= 2;
+#endif
+
 	XrEnvironmentDepthImageMETA depth_image = {
 		XR_TYPE_ENVIRONMENT_DEPTH_IMAGE_META, // type
+#if XR_META_environment_depth_SPEC_VERSION >= 2
+		request_capture_time ? &depth_image_timestamp : nullptr, // next
+#else
 		nullptr, // next
+#endif
 		0, // swapchainIndex
 		0.0, // nearZ
 		0.0, // farZ
@@ -277,10 +303,25 @@ void OpenXRMetaEnvironmentDepthExtension::_on_pre_render() {
 	};
 
 	XrResult result = xrAcquireEnvironmentDepthImageMETA(render_state.depth_provider, &acquire_info, &depth_image);
+	if (result == XR_ENVIRONMENT_DEPTH_NOT_AVAILABLE_META) {
+		return;
+	}
 	if (XR_FAILED(result)) {
 		UtilityFunctions::printerr("Failed to acquire environment depth image: ", openxr_api->get_error_string(result));
 		return;
 	}
+
+	if (depth_image.swapchainIndex >= render_state.depth_swapchain_textures.size()) {
+		UtilityFunctions::printerr("Environment depth acquisition returned an invalid swapchain image index.");
+		return;
+	}
+
+#if XR_META_environment_depth_SPEC_VERSION >= 2
+	if (request_capture_time && depth_image_timestamp.captureTime != 0) {
+		source_capture_time = depth_image_timestamp.captureTime;
+		source_capture_time_available = true;
+	}
+#endif
 
 	rs->global_shader_parameter_set(META_ENVIRONMENT_DEPTH_AVAILABLE_NAME, true);
 	rs->global_shader_parameter_set(META_ENVIRONMENT_DEPTH_TEXTURE_NAME, render_state.depth_swapchain_textures[depth_image.swapchainIndex]);
@@ -294,6 +335,8 @@ void OpenXRMetaEnvironmentDepthExtension::_on_pre_render() {
 	float z_far = openxr_api->get_render_state_z_far();
 
 	Array callback_data;
+	Array gpu_copy_views;
+	bool depth_map_readback_requested = render_state.depth_map_callbacks.size() > 0;
 
 	for (int i = 0; i < 2; i++) {
 		XrPosef local_from_depth_eye = depth_image.views[i].pose;
@@ -319,6 +362,14 @@ void OpenXRMetaEnvironmentDepthExtension::_on_pre_render() {
 
 		Projection depth_proj_view = godot_projection_mat * godot_view_mat;
 		Projection depth_inv_proj_view = depth_proj_view.inverse();
+
+		Dictionary gpu_copy_view;
+		gpu_copy_view["view_role"] = StringName(i == 0 ? "left" : "right");
+		gpu_copy_view["array_layer"] = i;
+		gpu_copy_view["depth_projection_view"] = depth_proj_view;
+		gpu_copy_view["depth_inverse_projection_view"] = depth_inv_proj_view;
+		gpu_copy_views.push_back(gpu_copy_view);
+
 		rs->global_shader_parameter_set(i == 0 ? META_ENVIRONMENT_DEPTH_PROJECTION_VIEW_LEFT_NAME : META_ENVIRONMENT_DEPTH_PROJECTION_VIEW_RIGHT_NAME, depth_proj_view);
 		rs->global_shader_parameter_set(i == 0 ? META_ENVIRONMENT_DEPTH_INV_PROJECTION_VIEW_LEFT_NAME : META_ENVIRONMENT_DEPTH_INV_PROJECTION_VIEW_RIGHT_NAME, depth_inv_proj_view);
 
@@ -333,26 +384,36 @@ void OpenXRMetaEnvironmentDepthExtension::_on_pre_render() {
 		rs->global_shader_parameter_set(i == 0 ? META_ENVIRONMENT_DEPTH_FROM_CAMERA_PROJECTION_LEFT_NAME : META_ENVIRONMENT_DEPTH_FROM_CAMERA_PROJECTION_RIGHT_NAME, depth_proj_view * camera_proj_view.inverse());
 		rs->global_shader_parameter_set(i == 0 ? META_ENVIRONMENT_DEPTH_TO_CAMERA_PROJECTION_LEFT_NAME : META_ENVIRONMENT_DEPTH_TO_CAMERA_PROJECTION_RIGHT_NAME, camera_proj_view * depth_inv_proj_view);
 
-		if (render_state.depth_map_callbacks.size() > 0) {
+		if (depth_map_readback_requested) {
 			Dictionary data;
 			data["depth_projection_view"] = depth_proj_view;
 			data["depth_inverse_projection_view"] = depth_inv_proj_view;
 
-			Ref<Image> image = rs->texture_2d_layer_get(render_state.depth_swapchain_textures[depth_image.swapchainIndex], i);
-			data["image"] = image;
+			if (render_state.graphics_api == GRAPHICS_API_OPENGL) {
+				Ref<Image> image = rs->texture_2d_layer_get(render_state.depth_swapchain_textures[depth_image.swapchainIndex], i);
+				data["image"] = image;
+			}
 
 			callback_data.push_back(data);
 		}
 	}
 
-	if (render_state.depth_map_callbacks.size() > 0) {
-		for (const Variant &v : render_state.depth_map_callbacks) {
-			Callable callback = v;
-			if (callback.is_valid()) {
-				callback.call_deferred(callback_data);
-			}
+	_process_environment_depth_gpu_copy_rt(
+			render_state.depth_swapchain_textures[depth_image.swapchainIndex],
+			gpu_copy_views,
+			depth_image.nearZ,
+			depth_image.farZ,
+			acquire_info.displayTime,
+			source_capture_time,
+			source_capture_time_available);
+
+	if (depth_map_readback_requested) {
+		if (render_state.graphics_api == GRAPHICS_API_VULKAN) {
+			_request_depth_map_readback_rt(render_state.depth_swapchain_textures[depth_image.swapchainIndex], callback_data);
+		} else {
+			_dispatch_depth_map_callbacks(render_state.depth_map_callbacks, callback_data);
+			render_state.depth_map_callbacks.clear();
 		}
-		render_state.depth_map_callbacks.clear();
 	}
 #endif // ANDROID_ENABLED
 }
@@ -372,6 +433,10 @@ void OpenXRMetaEnvironmentDepthExtension::start_environment_depth() {
 	ERR_FAIL_COND(depth_provider_started);
 
 	depth_provider_started = true;
+	{
+		std::lock_guard<std::mutex> lock(gpu_copy_mutex);
+		gpu_copy_source_accepting_requests = true;
+	}
 	setup_global_uniforms();
 
 	rs->call_on_render_thread(callable_mp(this, &OpenXRMetaEnvironmentDepthExtension::_start_environment_depth_rt));
@@ -516,6 +581,77 @@ void OpenXRMetaEnvironmentDepthExtension::get_environment_depth_map_async(const 
 	rs->call_on_render_thread(callable_mp(this, &OpenXRMetaEnvironmentDepthExtension::_add_depth_map_callback_rt).bind(p_callback));
 }
 
+Dictionary OpenXRMetaEnvironmentDepthExtension::get_environment_depth_gpu_copy_capabilities() {
+#ifdef ANDROID_ENABLED
+	GraphicsAPI graphics_api = get_graphics_api();
+	bool vulkan_graphics_api = graphics_api == GRAPHICS_API_VULKAN;
+	bool vulkan_supported = vulkan_graphics_api && is_environment_depth_supported();
+#else
+	bool vulkan_graphics_api = false;
+	bool vulkan_supported = false;
+#endif
+
+	Size2i image_size;
+	{
+		std::lock_guard<std::mutex> lock(gpu_copy_mutex);
+		image_size = gpu_copy_image_size;
+	}
+
+	Dictionary capabilities;
+	capabilities["supported"] = vulkan_supported;
+	capabilities["graphics_api"] = StringName(vulkan_graphics_api ? "VULKAN" : "UNSUPPORTED");
+	capabilities["extension_version"] = environment_depth_extension_version;
+#if XR_META_environment_depth_SPEC_VERSION >= 2
+	capabilities["capture_time_supported"] = environment_depth_extension_version >= 2;
+#else
+	capabilities["capture_time_supported"] = false;
+#endif
+	capabilities["depth_format"] = RenderingDevice::DATA_FORMAT_D16_UNORM;
+	capabilities["image_size"] = image_size;
+	capabilities["array_layer_count"] = ENVIRONMENT_DEPTH_ARRAY_LAYER_COUNT;
+	capabilities["maximum_pending_copy_requests"] = MAXIMUM_PENDING_GPU_COPY_REQUESTS;
+	return capabilities;
+}
+
+int64_t OpenXRMetaEnvironmentDepthExtension::request_environment_depth_gpu_copy(const RID &p_destination_texture_rid, const Callable &p_callback) {
+#ifndef ANDROID_ENABLED
+	(void)p_destination_texture_rid;
+	(void)p_callback;
+	return 0;
+#else
+	if (!p_destination_texture_rid.is_valid() || !p_callback.is_valid() || !depth_provider_started || get_graphics_api() != GRAPHICS_API_VULKAN || !is_environment_depth_supported()) {
+		return 0;
+	}
+
+	std::lock_guard<std::mutex> lock(gpu_copy_mutex);
+	if (!gpu_copy_source_accepting_requests || gpu_copy_requests.size() >= MAXIMUM_PENDING_GPU_COPY_REQUESTS || next_gpu_copy_request_id <= 0 || next_gpu_copy_request_id == std::numeric_limits<int64_t>::max()) {
+		return 0;
+	}
+
+	GpuCopyRequest request;
+	request.request_id = next_gpu_copy_request_id++;
+	request.destination_texture = p_destination_texture_rid;
+	request.callback = p_callback;
+	gpu_copy_requests.push_back(request);
+	return request.request_id;
+#endif
+}
+
+bool OpenXRMetaEnvironmentDepthExtension::cancel_environment_depth_gpu_copy(int64_t p_request_id) {
+	if (p_request_id <= 0) {
+		return false;
+	}
+
+	std::lock_guard<std::mutex> lock(gpu_copy_mutex);
+	for (uint32_t i = 0; i < gpu_copy_requests.size(); i++) {
+		if (gpu_copy_requests[i].request_id == p_request_id) {
+			gpu_copy_requests.remove_at(i);
+			return true;
+		}
+	}
+	return false;
+}
+
 static void create_shader_global_uniform(const String &p_name, RenderingServer::GlobalShaderParameterType p_type, Variant p_value, RenderingServer *p_rendering_server, ProjectSettings *p_project_settings, bool p_is_editor) {
 	String setting_name = "shader_globals/" + p_name;
 	if (!p_project_settings->has_setting(setting_name)) {
@@ -625,8 +761,57 @@ bool OpenXRMetaEnvironmentDepthExtension::initialize_meta_environment_depth_exte
 	return true;
 }
 
+uint32_t OpenXRMetaEnvironmentDepthExtension::_query_environment_depth_extension_version() {
+	Ref<OpenXRAPIExtension> openxr_api = get_openxr_api();
+	if (openxr_api.is_null()) {
+		return 0;
+	}
+
+	PFN_xrEnumerateInstanceExtensionProperties enumerate_instance_extension_properties = reinterpret_cast<PFN_xrEnumerateInstanceExtensionProperties>(openxr_api->get_instance_proc_addr("xrEnumerateInstanceExtensionProperties"));
+	if (enumerate_instance_extension_properties == nullptr) {
+		UtilityFunctions::printerr("Failed to obtain xrEnumerateInstanceExtensionProperties while checking the Meta environment depth revision.");
+		return 0;
+	}
+
+	uint32_t extension_count = 0;
+	XrResult result = enumerate_instance_extension_properties(nullptr, 0, &extension_count, nullptr);
+	if (XR_FAILED(result)) {
+		UtilityFunctions::printerr("Failed to enumerate OpenXR instance extension count: ", openxr_api->get_error_string(result));
+		return 0;
+	}
+
+	LocalVector<XrExtensionProperties> extension_properties;
+	extension_properties.resize(extension_count);
+	for (XrExtensionProperties &properties : extension_properties) {
+		properties.type = XR_TYPE_EXTENSION_PROPERTIES;
+		properties.next = nullptr;
+		properties.extensionName[0] = '\0';
+		properties.extensionVersion = 0;
+	}
+
+	result = enumerate_instance_extension_properties(nullptr, extension_count, &extension_count, extension_properties.ptr());
+	if (XR_FAILED(result)) {
+		UtilityFunctions::printerr("Failed to enumerate OpenXR instance extensions: ", openxr_api->get_error_string(result));
+		return 0;
+	}
+
+	for (const XrExtensionProperties &properties : extension_properties) {
+		if (std::strcmp(properties.extensionName, XR_META_ENVIRONMENT_DEPTH_EXTENSION_NAME) == 0) {
+			return properties.extensionVersion;
+		}
+	}
+
+	return 0;
+}
+
 void OpenXRMetaEnvironmentDepthExtension::cleanup() {
+	_resolve_pending_gpu_copy_requests(StringName("SOURCE_STOPPED"), "The Meta environment depth source is no longer available.");
 	meta_environment_depth_ext = false;
+	environment_depth_extension_version = 0;
+	{
+		std::lock_guard<std::mutex> lock(gpu_copy_mutex);
+		render_state.last_delivered_gpu_copy_capture_time = 0;
+	}
 }
 
 bool OpenXRMetaEnvironmentDepthExtension::_create_depth_provider_rt() {
@@ -687,7 +872,12 @@ bool OpenXRMetaEnvironmentDepthExtension::_create_depth_provider_rt() {
 		return false;
 	}
 
+	render_state.depth_swapchain_size = Size2i(swapchain_state.width, swapchain_state.height);
 	render_state.depth_swapchain_texel_size = Vector2(1.0 / swapchain_state.width, 1.0 / swapchain_state.height);
+	{
+		std::lock_guard<std::mutex> lock(gpu_copy_mutex);
+		gpu_copy_image_size = render_state.depth_swapchain_size;
+	}
 
 	uint32_t swapchain_length = 0;
 
@@ -756,7 +946,7 @@ bool OpenXRMetaEnvironmentDepthExtension::_create_depth_provider_rt() {
 					RenderingDevice::TEXTURE_TYPE_2D_ARRAY,
 					RenderingDevice::DATA_FORMAT_D16_UNORM,
 					RenderingDevice::TEXTURE_SAMPLES_1,
-					RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+					RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | RenderingDevice::TEXTURE_USAGE_CAN_COPY_FROM_BIT,
 					reinterpret_cast<uint64_t>(image.image),
 					swapchain_state.width,
 					swapchain_state.height,
@@ -794,6 +984,8 @@ void OpenXRMetaEnvironmentDepthExtension::_start_environment_depth_rt() {
 
 	if (render_state.depth_provider == XR_NULL_HANDLE) {
 		if (!_create_depth_provider_rt()) {
+			_resolve_pending_gpu_copy_requests(StringName("SOURCE_STOPPED"), "The Meta environment depth source failed to start.");
+			callable_mp(this, &OpenXRMetaEnvironmentDepthExtension::reset_state).call_deferred();
 			return;
 		}
 	}
@@ -801,6 +993,8 @@ void OpenXRMetaEnvironmentDepthExtension::_start_environment_depth_rt() {
 	XrResult result = xrStartEnvironmentDepthProviderMETA(render_state.depth_provider);
 	if (XR_FAILED(result)) {
 		UtilityFunctions::printerr("Failed to start environment depth provider: ", get_openxr_api()->get_error_string(result));
+		_resolve_pending_gpu_copy_requests(StringName("SOURCE_STOPPED"), "The Meta environment depth source failed to start.");
+		callable_mp(this, &OpenXRMetaEnvironmentDepthExtension::reset_state).call_deferred();
 		return;
 	}
 
@@ -810,6 +1004,7 @@ void OpenXRMetaEnvironmentDepthExtension::_start_environment_depth_rt() {
 void OpenXRMetaEnvironmentDepthExtension::_stop_environment_depth_rt() {
 	ERR_FAIL_COND(!render_state.depth_provider_started);
 	ERR_FAIL_NULL(render_state.depth_provider);
+	_resolve_pending_gpu_copy_requests(StringName("SOURCE_STOPPED"), "The Meta environment depth source stopped before the copy request could be fulfilled.");
 
 	XrResult result = xrStopEnvironmentDepthProviderMETA(render_state.depth_provider);
 	if (XR_FAILED(result)) {
@@ -844,7 +1039,228 @@ void OpenXRMetaEnvironmentDepthExtension::_add_depth_map_callback_rt(const Calla
 	render_state.depth_map_callbacks.push_back(p_callback);
 }
 
+void OpenXRMetaEnvironmentDepthExtension::_request_depth_map_readback_rt(const RID &p_texture, const Array &p_callback_data) {
+	DepthMapReadbackRequest request;
+	request.callback_data = p_callback_data;
+	request.callbacks = render_state.depth_map_callbacks;
+	request.image_size = render_state.depth_swapchain_size;
+
+	int64_t request_id = render_state.next_depth_map_readback_request_id++;
+	render_state.depth_map_readback_requests.insert(request_id, request);
+	render_state.depth_map_callbacks.clear();
+
+	RenderingServer *rs = RenderingServer::get_singleton();
+	RenderingDevice *rendering_device = rs != nullptr ? rs->get_rendering_device() : nullptr;
+	RID rd_texture = rs != nullptr ? rs->texture_get_rd_texture(p_texture) : RID();
+
+	for (int32_t layer = 0; layer < 2; layer++) {
+		Error error = ERR_UNAVAILABLE;
+		if (rendering_device != nullptr && rd_texture.is_valid()) {
+			error = rendering_device->texture_get_data_async(
+					rd_texture,
+					layer,
+					callable_mp(this, &OpenXRMetaEnvironmentDepthExtension::_on_depth_map_data_received).bind(request_id, layer));
+		}
+
+		if (error != OK) {
+			UtilityFunctions::printerr("Failed to request environment depth data for layer ", layer, " (error ", error, ").");
+			_on_depth_map_data_received(PackedByteArray(), request_id, layer);
+		}
+	}
+}
+
+void OpenXRMetaEnvironmentDepthExtension::_on_depth_map_data_received(const PackedByteArray &p_data, int64_t p_request_id, int32_t p_layer) {
+	ERR_FAIL_INDEX(p_layer, 2);
+
+	DepthMapReadbackRequest *request = render_state.depth_map_readback_requests.getptr(p_request_id);
+	if (request == nullptr) {
+		UtilityFunctions::printerr("Received environment depth data for an unknown readback request.");
+		return;
+	}
+	if (request->completed_layers[p_layer]) {
+		UtilityFunctions::printerr("Received environment depth data more than once for layer ", p_layer, ".");
+		return;
+	}
+
+	Ref<Image> image;
+	int64_t pixel_count = int64_t(request->image_size.x) * int64_t(request->image_size.y);
+	int64_t expected_size = pixel_count * 2;
+	if (p_data.size() == expected_size) {
+		// Vulkan returns the D16_UNORM texels verbatim, while FORMAT_RH stores
+		// IEEE-754 half floats. Convert through FORMAT_RF so the CPU image has
+		// the same normalized depth values and format as the OpenGL path.
+		PackedFloat32Array normalized_depth;
+		normalized_depth.resize(pixel_count);
+
+		const uint8_t *source = p_data.ptr();
+		float *destination = normalized_depth.ptrw();
+		for (int64_t pixel = 0; pixel < pixel_count; pixel++) {
+			uint16_t depth = uint16_t(source[pixel * 2]) | (uint16_t(source[pixel * 2 + 1]) << 8);
+			destination[pixel] = float(depth) / 65535.0f;
+		}
+
+		image = Image::create_from_data(
+				request->image_size.x,
+				request->image_size.y,
+				false,
+				Image::FORMAT_RF,
+				normalized_depth.to_byte_array());
+		image->convert(Image::FORMAT_RH);
+	} else {
+		UtilityFunctions::printerr("Environment depth data for layer ", p_layer, " has an unexpected size (expected ", expected_size, ", got ", p_data.size(), ").");
+	}
+
+	Dictionary layer_data = request->callback_data[p_layer];
+	layer_data["image"] = image;
+	request->callback_data[p_layer] = layer_data;
+	request->completed_layers[p_layer] = true;
+	request->pending_layers--;
+
+	if (request->pending_layers == 0) {
+		Array callback_data = request->callback_data;
+		LocalVector<Callable> callbacks = request->callbacks;
+		render_state.depth_map_readback_requests.erase(p_request_id);
+		_dispatch_depth_map_callbacks(callbacks, callback_data);
+	}
+}
+
+void OpenXRMetaEnvironmentDepthExtension::_dispatch_depth_map_callbacks(const LocalVector<Callable> &p_callbacks, const Array &p_callback_data) {
+	for (const Callable &callback : p_callbacks) {
+		if (callback.is_valid()) {
+			callback.call_deferred(p_callback_data);
+		}
+	}
+}
+
+void OpenXRMetaEnvironmentDepthExtension::_process_environment_depth_gpu_copy_rt(const RID &p_source_texture, const Array &p_views, float p_near_z, float p_far_z, XrTime p_projection_display_time, XrTime p_source_capture_time, bool p_source_capture_time_available) {
+	GpuCopyRequest request;
+	{
+		std::lock_guard<std::mutex> lock(gpu_copy_mutex);
+		if (gpu_copy_requests.is_empty()) {
+			return;
+		}
+		if (p_source_capture_time_available && p_source_capture_time == render_state.last_delivered_gpu_copy_capture_time) {
+			return;
+		}
+
+		request = gpu_copy_requests[0];
+		gpu_copy_requests.remove_at(0);
+	}
+
+	auto dispatch_failure = [&request](const StringName &p_status, const String &p_error_message) {
+		Dictionary failure;
+		failure["request_id"] = request.request_id;
+		failure["status"] = p_status;
+		failure["error_message"] = p_error_message;
+		if (request.callback.is_valid()) {
+			request.callback.call_deferred(failure);
+		}
+	};
+
+	RenderingServer *rendering_server = RenderingServer::get_singleton();
+	RenderingDevice *rendering_device = rendering_server != nullptr ? rendering_server->get_rendering_device() : nullptr;
+	if (rendering_device == nullptr) {
+		dispatch_failure(StringName("COPY_FAILED"), "The global RenderingDevice is unavailable.");
+		return;
+	}
+	if (!rendering_device->texture_is_valid(request.destination_texture)) {
+		dispatch_failure(StringName("TARGET_INVALID"), "The destination RID is not a valid global RenderingDevice texture.");
+		return;
+	}
+
+	Ref<RDTextureFormat> destination_format = rendering_device->texture_get_format(request.destination_texture);
+	if (destination_format.is_null()) {
+		dispatch_failure(StringName("TARGET_INVALID"), "The destination texture format could not be queried.");
+		return;
+	}
+
+	BitField<RenderingDevice::TextureUsageBits> destination_usage = destination_format->get_usage_bits();
+	String target_error;
+	if (destination_format->get_texture_type() != RenderingDevice::TEXTURE_TYPE_2D_ARRAY) {
+		target_error = "The destination texture must be a 2D array texture.";
+	} else if (destination_format->get_format() != RenderingDevice::DATA_FORMAT_D16_UNORM) {
+		target_error = "The destination texture must use DATA_FORMAT_D16_UNORM.";
+	} else if (destination_format->get_width() != static_cast<uint32_t>(render_state.depth_swapchain_size.x) || destination_format->get_height() != static_cast<uint32_t>(render_state.depth_swapchain_size.y) || destination_format->get_depth() != 1) {
+		target_error = "The destination texture dimensions do not match the active Meta environment depth image.";
+	} else if (destination_format->get_array_layers() != ENVIRONMENT_DEPTH_ARRAY_LAYER_COUNT) {
+		target_error = "The destination texture must have exactly two array layers.";
+	} else if (destination_format->get_mipmaps() != 1) {
+		target_error = "The destination texture must have exactly one mip level.";
+	} else if (destination_format->get_samples() != RenderingDevice::TEXTURE_SAMPLES_1) {
+		target_error = "The destination texture must have exactly one sample.";
+	} else if (!destination_usage.has_flag(RenderingDevice::TEXTURE_USAGE_CAN_COPY_TO_BIT) || !destination_usage.has_flag(RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT)) {
+		target_error = "The destination texture must support copying to it and sampling from it.";
+	}
+
+	if (!target_error.is_empty()) {
+		dispatch_failure(StringName("TARGET_INVALID"), target_error);
+		return;
+	}
+
+	RID source_texture = rendering_server->texture_get_rd_texture(p_source_texture);
+	if (!source_texture.is_valid() || !rendering_device->texture_is_valid(source_texture)) {
+		dispatch_failure(StringName("COPY_FAILED"), "The acquired Meta environment depth texture is unavailable to the global RenderingDevice.");
+		return;
+	}
+
+	Vector3 copy_size(render_state.depth_swapchain_size.x, render_state.depth_swapchain_size.y, 1);
+	for (uint32_t layer = 0; layer < ENVIRONMENT_DEPTH_ARRAY_LAYER_COUNT; layer++) {
+		Error copy_error = rendering_device->texture_copy(source_texture, request.destination_texture, Vector3(), Vector3(), copy_size, 0, 0, layer, layer);
+		if (copy_error != OK) {
+			dispatch_failure(StringName("COPY_FAILED"), vformat("The global RenderingDevice rejected the environment depth copy for array layer %d (error %d).", layer, copy_error));
+			return;
+		}
+	}
+
+	if (p_source_capture_time_available) {
+		std::lock_guard<std::mutex> lock(gpu_copy_mutex);
+		render_state.last_delivered_gpu_copy_capture_time = p_source_capture_time;
+	}
+
+	Dictionary success;
+	success["request_id"] = request.request_id;
+	success["status"] = StringName("COPY_ENQUEUED");
+	success["image_size"] = render_state.depth_swapchain_size;
+	success["depth_format"] = RenderingDevice::DATA_FORMAT_D16_UNORM;
+	success["array_layer_count"] = ENVIRONMENT_DEPTH_ARRAY_LAYER_COUNT;
+	success["near_z"] = p_near_z;
+	success["far_z"] = p_far_z;
+	success["views"] = p_views;
+	success["projection_display_time_nsec"] = static_cast<int64_t>(p_projection_display_time);
+	success["source_capture_time_nsec"] = static_cast<int64_t>(p_source_capture_time);
+	success["source_capture_time_available"] = p_source_capture_time_available;
+	success["extension_version"] = environment_depth_extension_version;
+	if (request.callback.is_valid()) {
+		request.callback.call_deferred(success);
+	}
+}
+
+void OpenXRMetaEnvironmentDepthExtension::_resolve_pending_gpu_copy_requests(const StringName &p_status, const String &p_error_message) {
+	LocalVector<GpuCopyRequest> pending_requests;
+	{
+		std::lock_guard<std::mutex> lock(gpu_copy_mutex);
+		gpu_copy_source_accepting_requests = false;
+		pending_requests.reserve(gpu_copy_requests.size());
+		for (const GpuCopyRequest &request : gpu_copy_requests) {
+			pending_requests.push_back(request);
+		}
+		gpu_copy_requests.clear();
+	}
+
+	for (const GpuCopyRequest &request : pending_requests) {
+		Dictionary failure;
+		failure["request_id"] = request.request_id;
+		failure["status"] = p_status;
+		failure["error_message"] = p_error_message;
+		if (request.callback.is_valid()) {
+			request.callback.call_deferred(failure);
+		}
+	}
+}
+
 void OpenXRMetaEnvironmentDepthExtension::_destroy_depth_provider_rt() {
+	_resolve_pending_gpu_copy_requests(StringName("SOURCE_STOPPED"), "The Meta environment depth source was destroyed before the copy request could be fulfilled.");
+
 	if (render_state.depth_provider_started) {
 		_stop_environment_depth_rt();
 	}
@@ -858,6 +1274,12 @@ void OpenXRMetaEnvironmentDepthExtension::_destroy_depth_provider_rt() {
 	}
 
 	render_state.depth_swapchain_textures.clear();
+	render_state.depth_swapchain_size = Size2i();
+	render_state.depth_swapchain_texel_size = Vector2();
+	{
+		std::lock_guard<std::mutex> lock(gpu_copy_mutex);
+		gpu_copy_image_size = Size2i();
+	}
 
 	if (render_state.depth_provider != XR_NULL_HANDLE) {
 		XrResult result = xrDestroyEnvironmentDepthProviderMETA(render_state.depth_provider);
