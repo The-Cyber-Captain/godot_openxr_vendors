@@ -1,0 +1,2 @@
+exclude:
+  - thirdparty/openxr-source/changes/template.md
