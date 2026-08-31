@@ -1,12 +1,17 @@
 extends Control
 
 @onready var info_label: Label = %InfoLabel
+@onready var temporal_location_label: Label = %TemporalLocationLabel
 
 signal eye_mode_changed(eye_mode: String)
 
 
 func set_info_label_text(p_text: String) -> void:
 	info_label.text = p_text
+
+
+func set_temporal_location_text(p_text: String) -> void:
+	temporal_location_label.text = p_text
 
 
 func _on_eye_gaze_interaction_button_pressed() -> void:

@@ -33,6 +33,7 @@
 #include <godot_cpp/classes/open_xrapi_extension.hpp>
 #include <godot_cpp/classes/xr_server.hpp>
 #include <godot_cpp/templates/local_vector.hpp>
+#include <godot_cpp/variant/array.hpp>
 
 using namespace godot;
 
@@ -136,6 +137,68 @@ static const JointMapEntry joint_table[] = {
 	{ XRBodyTracker::JOINT_RIGHT_TOES, XR_FULL_BODY_JOINT_RIGHT_FOOT_BALL_META, Quaternion(-0.5, 0.5, 0.5, 0.5) },
 };
 
+struct CanonicalBodyJoint {
+	Transform3D transform;
+	BitField<XRBodyTracker::JointFlags> flags;
+	bool populated = false;
+
+	CanonicalBodyJoint() :
+			flags(0) {}
+};
+
+static int convert_body_joint_locations(const XrBodyJointLocationFB *p_locations, bool p_is_active, bool p_full_body_available, LocalVector<CanonicalBodyJoint> &r_joints) {
+	r_joints.resize(XRBodyTracker::JOINT_MAX);
+	for (int joint_index = 0; joint_index < XRBodyTracker::JOINT_MAX; joint_index++) {
+		r_joints[joint_index] = CanonicalBodyJoint();
+	}
+
+	int populated_joint_count = 0;
+	for (const JointMapEntry &entry : joint_table) {
+		if (!p_full_body_available && entry.fb_joint >= XR_BODY_JOINT_COUNT_FB) {
+			continue;
+		}
+
+		const XrBodyJointLocationFB &location = p_locations[entry.fb_joint];
+		const XrPosef &pose = location.pose;
+		CanonicalBodyJoint &joint = r_joints[entry.xr_joint];
+		joint.populated = true;
+		populated_joint_count++;
+
+		if (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) {
+			joint.flags.set_flag(XRBodyTracker::JOINT_FLAG_ORIENTATION_VALID);
+			joint.transform.basis = Basis(Quaternion(pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w) * entry.rotation);
+		}
+		if (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT) {
+			joint.flags.set_flag(XRBodyTracker::JOINT_FLAG_ORIENTATION_TRACKED);
+		}
+		if (location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) {
+			joint.flags.set_flag(XRBodyTracker::JOINT_FLAG_POSITION_VALID);
+			joint.transform.origin = Vector3(pose.position.x, pose.position.y, pose.position.z);
+		}
+		if (location.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) {
+			joint.flags.set_flag(XRBodyTracker::JOINT_FLAG_POSITION_TRACKED);
+		}
+	}
+
+	if (p_is_active) {
+		Transform3D &hips = r_joints[XRBodyTracker::JOINT_HIPS].transform;
+		Vector3 root_y = Vector3(0.0, 1.0, 0.0);
+		Vector3 hips_left = hips.basis.get_column(Vector3::AXIS_X);
+		Vector3 root_x = (hips_left.slide(Vector3(0.0, 1.0, 0.0))).normalized();
+		Vector3 root_z = root_x.cross(root_y);
+		Vector3 root_o = r_joints[XRBodyTracker::JOINT_ROOT].transform.origin;
+		r_joints[XRBodyTracker::JOINT_ROOT].transform = Transform3D(root_x, root_y, root_z, root_o).orthonormalized();
+
+		constexpr float shoulder_z_offset = -0.07;
+		Transform3D &upper_chest = r_joints[XRBodyTracker::JOINT_UPPER_CHEST].transform;
+		Vector3 shoulder_offset = upper_chest.basis.get_column(Vector3::AXIS_Z) * shoulder_z_offset;
+		r_joints[XRBodyTracker::JOINT_LEFT_SHOULDER].transform.origin += shoulder_offset;
+		r_joints[XRBodyTracker::JOINT_RIGHT_SHOULDER].transform.origin += shoulder_offset;
+	}
+
+	return populated_joint_count;
+}
+
 OpenXRFbBodyTrackingExtension *OpenXRFbBodyTrackingExtension::singleton = nullptr;
 
 OpenXRFbBodyTrackingExtension *OpenXRFbBodyTrackingExtension::get_singleton() {
@@ -163,6 +226,10 @@ OpenXRFbBodyTrackingExtension::~OpenXRFbBodyTrackingExtension() {
 }
 
 void OpenXRFbBodyTrackingExtension::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("get_predicted_display_time_raw"), &OpenXRFbBodyTrackingExtension::get_predicted_display_time_raw);
+	ClassDB::bind_method(D_METHOD("locate_head_at_time_raw", "xr_time"), &OpenXRFbBodyTrackingExtension::locate_head_at_time_raw);
+	ClassDB::bind_method(D_METHOD("locate_body_at_time_raw", "xr_time"), &OpenXRFbBodyTrackingExtension::locate_body_at_time_raw);
+
 	ClassDB::bind_method(D_METHOD("is_full_body_tracking_supported"), &OpenXRFbBodyTrackingExtension::is_full_body_tracking_supported);
 
 	ClassDB::bind_method(D_METHOD("is_body_tracking_fidelity_supported"), &OpenXRFbBodyTrackingExtension::is_body_tracking_fidelity_supported);
@@ -186,6 +253,7 @@ void OpenXRFbBodyTrackingExtension::_bind_methods() {
 void OpenXRFbBodyTrackingExtension::cleanup() {
 	fb_body_tracking_ext = false;
 	meta_body_tracking_full_body_ext = false;
+	time_location_functions_initialized = false;
 
 	meta_body_tracking_fidelity_ext = false;
 	meta_body_tracking_calibration_ext = false;
@@ -224,6 +292,11 @@ godot::Dictionary OpenXRFbBodyTrackingExtension::_get_requested_extensions(uint6
 }
 
 void OpenXRFbBodyTrackingExtension::_on_instance_created(uint64_t p_instance) {
+	time_location_functions_initialized = initialize_time_location_functions();
+	if (!time_location_functions_initialized) {
+		ERR_PRINT("Failed to initialize OpenXR temporal location functions");
+	}
+
 	if (fb_body_tracking_ext) {
 		bool result = initialize_fb_body_tracking_extension((XrInstance)p_instance);
 		if (!result) {
@@ -254,9 +327,24 @@ void OpenXRFbBodyTrackingExtension::_on_instance_destroyed() {
 }
 
 void OpenXRFbBodyTrackingExtension::_on_session_created(uint64_t instance) {
-	// Skip if not enabled
+	// Meta Body Tracking is the deliberate prerequisite for this extension's
+	// timestamped body and companion view-pose observation surface.
 	if (!is_enabled()) {
 		return;
+	}
+
+	if (time_location_functions_initialized) {
+		const XrReferenceSpaceCreateInfo create_info = {
+			XR_TYPE_REFERENCE_SPACE_CREATE_INFO, // type
+			nullptr, // next
+			XR_REFERENCE_SPACE_TYPE_VIEW, // referenceSpaceType
+			{ { 0.0f, 0.0f, 0.0f, 1.0f }, { 0.0f, 0.0f, 0.0f } }, // poseInReferenceSpace
+		};
+		const XrResult result = xrCreateReferenceSpace(SESSION, &create_info, &view_space);
+		if (XR_FAILED(result)) {
+			ERR_PRINT(vformat("Failed to create OpenXR view reference space: %s", get_openxr_api()->get_error_string(result)));
+			view_space = XR_NULL_HANDLE;
+		}
 	}
 
 	// Create the body-tracker handle
@@ -287,17 +375,13 @@ void OpenXRFbBodyTrackingExtension::_on_session_created(uint64_t instance) {
 }
 
 void OpenXRFbBodyTrackingExtension::_on_session_destroyed() {
-	// Skip if no body-tracker handle
-	if (!body_tracker) {
-		return;
+	if (body_tracker) {
+		const XrResult result = xrDestroyBodyTrackerFB(body_tracker);
+		if (XR_FAILED(result)) {
+			ERR_PRINT(vformat("Failed to destroy body-tracker handle: %s", get_openxr_api()->get_error_string(result)));
+		}
+		body_tracker = XR_NULL_HANDLE;
 	}
-
-	// Destroy the body-tracker handle
-	XrResult result = xrDestroyBodyTrackerFB(body_tracker);
-	if (XR_FAILED(result)) {
-		ERR_PRINT(vformat("Failed to destroy body-tracker handle: %s", get_openxr_api()->get_error_string(result)));
-	}
-	body_tracker = XR_NULL_HANDLE;
 
 	// Unregister the body tracker.
 	if (xr_body_tracker_registered) {
@@ -307,6 +391,14 @@ void OpenXRFbBodyTrackingExtension::_on_session_destroyed() {
 		}
 	}
 	xr_body_tracker_registered = false;
+
+	if (view_space) {
+		const XrResult result = xrDestroySpace(view_space);
+		if (XR_FAILED(result)) {
+			ERR_PRINT(vformat("Failed to destroy OpenXR view reference space: %s", get_openxr_api()->get_error_string(result)));
+		}
+		view_space = XR_NULL_HANDLE;
+	}
 }
 
 void OpenXRFbBodyTrackingExtension::_on_process() {
@@ -365,84 +457,22 @@ void OpenXRFbBodyTrackingExtension::_on_process() {
 	// Set the tracking active flag
 	xr_body_tracker->set_has_tracking_data(locations.isActive);
 
-	// Process all joints
+	const bool full_body_available = meta_body_tracking_full_body_ext && is_full_body_supported;
+	LocalVector<CanonicalBodyJoint> canonical_joints;
+	convert_body_joint_locations(fb_locations, locations.isActive, full_body_available, canonical_joints);
+
 	for (const JointMapEntry &entry : joint_table) {
-		// Skip full body joints if extension is not supported.
-		if (!is_full_body_supported && entry.fb_joint >= XR_BODY_JOINT_COUNT_FB) {
-			break;
+		const CanonicalBodyJoint &joint = canonical_joints[entry.xr_joint];
+		if (!joint.populated) {
+			continue;
 		}
-
-		// Process the joint pose
-		const XrBodyJointLocationFB &location = fb_locations[entry.fb_joint];
-		const XrPosef &pose = location.pose;
-		Transform3D transform;
-		BitField<XRBodyTracker::JointFlags> flags(0);
-
-		// Analyze the available joint data
-		if (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) {
-			flags.set_flag(XRBodyTracker::JOINT_FLAG_ORIENTATION_VALID);
-			transform.basis = Basis(Quaternion(pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w) * entry.rotation);
-		}
-		if (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT) {
-			flags.set_flag(XRBodyTracker::JOINT_FLAG_ORIENTATION_TRACKED);
-		}
-		if (location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) {
-			flags.set_flag(XRBodyTracker::JOINT_FLAG_POSITION_VALID);
-			transform.origin = Vector3(pose.position.x, pose.position.y, pose.position.z);
-		}
-		if (location.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) {
-			flags.set_flag(XRBodyTracker::JOINT_FLAG_POSITION_TRACKED);
-		}
-
-		// Set the joint information
-		xr_body_tracker->set_joint_flags(entry.xr_joint, flags);
-		xr_body_tracker->set_joint_transform(entry.xr_joint, transform);
+		xr_body_tracker->set_joint_flags(entry.xr_joint, joint.flags);
+		xr_body_tracker->set_joint_transform(entry.xr_joint, joint.transform);
 	}
 
-	// If the location data is good then we need to apply some corrections
-	// before handing the data back to Godot. These include:
-	//
-	// - The Root joint carries no useful orientation data, so instead align it
-	//   under the hips pointing forwards.
-	//
-	// - Adjusting the left and right shoulder back so they are aligned
-	//   with how models are designed, rather than the Meta positions of
-	//   the tips of the clavicles.
 	if (locations.isActive) {
-		// Align root under the hips pointing 'forwards'
-		// IE, +z aligns with hips & user's real-world [upper-body] forward.
-		// (Remaining, however, parallel to the XRorigin / Global XZ plane; root's basis rotated around Y to fit)
-
-		// Get the hips transform
-		Transform3D hips = xr_body_tracker->get_joint_transform(XRBodyTracker::JOINT_HIPS);
-		Vector3 root_y = Vector3(0.0, 1.0, 0.0);
-		Vector3 hips_left = hips.basis.get_column(Vector3::AXIS_X);
-		Vector3 root_x = (hips_left.slide(Vector3(0.0, 1.0, 0.0))).normalized();
-		Vector3 root_z = root_x.cross(root_y);
-		Vector3 root_o = xr_body_tracker->get_joint_transform(XRBodyTracker::JOINT_ROOT).origin;
-		Transform3D root = Transform3D(root_x, root_y, root_z, root_o).orthonormalized();
-		xr_body_tracker->set_joint_transform(XRBodyTracker::JOINT_ROOT, root);
-		// Set tracker pose, velocities, confidence.
+		const Transform3D &root = canonical_joints[XRBodyTracker::JOINT_ROOT].transform;
 		xr_body_tracker->set_pose("default", root, Vector3(), Vector3(), XRPose::XR_TRACKING_CONFIDENCE_HIGH);
-
-		// Distance in meters to push the shoulder joints back from the
-		// clavicle-position to be in-line with the upper arm joints as
-		// required for T-Pose designed models.
-		constexpr float shoulder_z_offset = -0.07;
-
-		// Deduce the shoulder offset from the upper chest transform
-		Transform3D upper_chest = xr_body_tracker->get_joint_transform(XRBodyTracker::JOINT_UPPER_CHEST);
-		Vector3 shoulder_offset = upper_chest.basis.get_column(Vector3::AXIS_Z) * shoulder_z_offset;
-
-		// Correct the left shoulder
-		Transform3D left_shoulder = xr_body_tracker->get_joint_transform(XRBodyTracker::JOINT_LEFT_SHOULDER);
-		left_shoulder.origin += shoulder_offset;
-		xr_body_tracker->set_joint_transform(XRBodyTracker::JOINT_LEFT_SHOULDER, left_shoulder);
-
-		// Correct the right shoulder
-		Transform3D right_shoulder = xr_body_tracker->get_joint_transform(XRBodyTracker::JOINT_RIGHT_SHOULDER);
-		right_shoulder.origin += shoulder_offset;
-		xr_body_tracker->set_joint_transform(XRBodyTracker::JOINT_RIGHT_SHOULDER, right_shoulder);
 	}
 
 	// Register the XRBodyTracker if necessary
@@ -455,8 +485,181 @@ void OpenXRFbBodyTrackingExtension::_on_process() {
 	}
 }
 
+int64_t OpenXRFbBodyTrackingExtension::get_predicted_display_time_raw() {
+	if (!is_enabled() || !get_openxr_api().is_valid() || !get_openxr_api()->is_running()) {
+		return 0;
+	}
+
+	return get_openxr_api()->get_predicted_display_time();
+}
+
+Dictionary OpenXRFbBodyTrackingExtension::create_query_result(int64_t p_xr_time) const {
+	Dictionary result;
+	result["requested_time"] = p_xr_time;
+	result["success"] = false;
+	result["error_code"] = int64_t(XR_ERROR_HANDLE_INVALID);
+	result["error_string"] = "OpenXR temporal location is unavailable";
+	return result;
+}
+
+void OpenXRFbBodyTrackingExtension::set_query_error(Dictionary &r_result, XrResult p_error, const String &p_context) {
+	r_result["success"] = XR_SUCCEEDED(p_error);
+	r_result["error_code"] = int64_t(p_error);
+
+	String error_string = get_openxr_api().is_valid() ? get_openxr_api()->get_error_string(p_error) : String("Unknown OpenXR result");
+	if (!p_context.is_empty()) {
+		error_string = p_context + String(": ") + error_string;
+	}
+	r_result["error_string"] = error_string;
+}
+
+Dictionary OpenXRFbBodyTrackingExtension::locate_head_at_time_raw(int64_t p_xr_time) {
+	Dictionary result = create_query_result(p_xr_time);
+	result["transform"] = Transform3D();
+	result["location_flags"] = int64_t(0);
+	result["position_valid"] = false;
+	result["orientation_valid"] = false;
+	result["position_tracked"] = false;
+	result["orientation_tracked"] = false;
+	result["linear_velocity"] = Vector3();
+	result["angular_velocity"] = Vector3();
+	result["velocity_flags"] = int64_t(0);
+	result["linear_velocity_valid"] = false;
+	result["angular_velocity_valid"] = false;
+
+	if (!is_enabled() || !time_location_functions_initialized || !view_space || !get_openxr_api().is_valid() || !get_openxr_api()->get_play_space()) {
+		return result;
+	}
+
+	XrSpaceVelocity velocity = {
+		XR_TYPE_SPACE_VELOCITY, // type
+		nullptr, // next
+		0, // velocityFlags
+		{ 0.0f, 0.0f, 0.0f }, // linearVelocity
+		{ 0.0f, 0.0f, 0.0f }, // angularVelocity
+	};
+	XrSpaceLocation location = {
+		XR_TYPE_SPACE_LOCATION, // type
+		&velocity, // next
+		0, // locationFlags
+		{ { 0.0f, 0.0f, 0.0f, 1.0f }, { 0.0f, 0.0f, 0.0f } }, // pose
+	};
+
+	const XrResult xr_result = xrLocateSpace(view_space, (XrSpace)get_openxr_api()->get_play_space(), (XrTime)p_xr_time, &location);
+	set_query_error(result, xr_result, "xrLocateSpace");
+	if (XR_FAILED(xr_result)) {
+		return result;
+	}
+
+	const bool orientation_valid = location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+	const bool position_valid = location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT;
+	Transform3D transform;
+	if (orientation_valid) {
+		transform.basis = Basis(Quaternion(location.pose.orientation.x, location.pose.orientation.y, location.pose.orientation.z, location.pose.orientation.w));
+	}
+	if (position_valid) {
+		transform.origin = OpenXRUtilities::XrVector3f_to_godot_vector3(location.pose.position);
+	}
+
+	result["transform"] = transform;
+	result["location_flags"] = int64_t(location.locationFlags);
+	result["position_valid"] = position_valid;
+	result["orientation_valid"] = orientation_valid;
+	result["position_tracked"] = bool(location.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT);
+	result["orientation_tracked"] = bool(location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT);
+	result["velocity_flags"] = int64_t(velocity.velocityFlags);
+	result["linear_velocity_valid"] = bool(velocity.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT);
+	result["angular_velocity_valid"] = bool(velocity.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT);
+	if (velocity.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) {
+		result["linear_velocity"] = OpenXRUtilities::XrVector3f_to_godot_vector3(velocity.linearVelocity);
+	}
+	if (velocity.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) {
+		result["angular_velocity"] = OpenXRUtilities::XrVector3f_to_godot_vector3(velocity.angularVelocity);
+	}
+
+	return result;
+}
+
+Dictionary OpenXRFbBodyTrackingExtension::locate_body_at_time_raw(int64_t p_xr_time) {
+	Dictionary result = create_query_result(p_xr_time);
+	result["effective_time"] = int64_t(0);
+	result["is_active"] = false;
+	result["confidence"] = 0.0f;
+	result["skeleton_changed_count"] = int64_t(0);
+	result["body_tracking_supported"] = is_enabled();
+	result["full_body_supported"] = meta_body_tracking_full_body_ext && is_full_body_tracking_supported();
+	result["joint_count"] = 0;
+	result["joints"] = Array();
+
+	if (!is_enabled() || !body_tracker || !get_openxr_api().is_valid() || !get_openxr_api()->get_play_space()) {
+		return result;
+	}
+
+	const XrBodyJointsLocateInfoFB locate_info = {
+		XR_TYPE_BODY_JOINTS_LOCATE_INFO_FB, // type
+		nullptr, // next
+		(XrSpace)get_openxr_api()->get_play_space(), // baseSpace
+		(XrTime)p_xr_time, // time
+	};
+
+	const bool full_body = meta_body_tracking_full_body_ext && system_body_tracking_full_body_properties.supportsFullBodyTracking;
+	const uint32_t joint_count = full_body ? XR_FULL_BODY_JOINT_COUNT_META : XR_BODY_JOINT_COUNT_FB;
+	XrBodyJointLocationFB joint_locations[XR_FULL_BODY_JOINT_COUNT_META] = {};
+	XrBodyJointLocationsFB locations = {
+		XR_TYPE_BODY_JOINT_LOCATIONS_FB, // type
+		nullptr, // next
+		XR_FALSE, // isActive
+		0.0f, // confidence
+		joint_count, // jointCount
+		joint_locations, // jointLocations
+		0, // skeletonChangedCount
+		0, // time
+	};
+
+	const XrResult xr_result = xrLocateBodyJointsFB(body_tracker, &locate_info, &locations);
+	set_query_error(result, xr_result, "xrLocateBodyJointsFB");
+	if (XR_FAILED(xr_result)) {
+		return result;
+	}
+
+	LocalVector<CanonicalBodyJoint> canonical_joints;
+	const int canonical_joint_count = convert_body_joint_locations(joint_locations, locations.isActive, full_body, canonical_joints);
+	Array joints;
+	joints.resize(XRBodyTracker::JOINT_MAX);
+	for (int joint_index = 0; joint_index < XRBodyTracker::JOINT_MAX; joint_index++) {
+		const CanonicalBodyJoint &canonical_joint = canonical_joints[joint_index];
+		if (!canonical_joint.populated) {
+			continue;
+		}
+
+		Dictionary joint;
+		joint["transform"] = canonical_joint.transform;
+		joint["position_valid"] = canonical_joint.flags.has_flag(XRBodyTracker::JOINT_FLAG_POSITION_VALID);
+		joint["orientation_valid"] = canonical_joint.flags.has_flag(XRBodyTracker::JOINT_FLAG_ORIENTATION_VALID);
+		joint["position_tracked"] = canonical_joint.flags.has_flag(XRBodyTracker::JOINT_FLAG_POSITION_TRACKED);
+		joint["orientation_tracked"] = canonical_joint.flags.has_flag(XRBodyTracker::JOINT_FLAG_ORIENTATION_TRACKED);
+		joints[joint_index] = joint;
+	}
+
+	result["effective_time"] = int64_t(locations.time);
+	result["is_active"] = bool(locations.isActive);
+	result["confidence"] = locations.confidence;
+	result["skeleton_changed_count"] = int64_t(locations.skeletonChangedCount);
+	result["joint_count"] = canonical_joint_count;
+	result["joints"] = joints;
+	return result;
+}
+
 bool OpenXRFbBodyTrackingExtension::is_enabled() const {
 	return fb_body_tracking_ext && system_body_tracking_properties.supportsBodyTracking;
+}
+
+bool OpenXRFbBodyTrackingExtension::initialize_time_location_functions() {
+	GDEXTENSION_INIT_XR_FUNC_V(xrCreateReferenceSpace);
+	GDEXTENSION_INIT_XR_FUNC_V(xrDestroySpace);
+	GDEXTENSION_INIT_XR_FUNC_V(xrLocateSpace);
+
+	return true;
 }
 
 bool OpenXRFbBodyTrackingExtension::initialize_fb_body_tracking_extension(const XrInstance p_instance) {
