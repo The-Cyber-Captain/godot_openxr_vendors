@@ -12,7 +12,7 @@
 		<method name="get_predicted_display_time_raw">
 			<return type="int" />
 			<description>
-				Returns the current predicted-display [code]XrTime[/code] as a signed 64-bit integer. This is an opaque value in the OpenXR runtime's clock domain. Meta Body Tracking must be enabled; returns [code]0[/code] when body tracking is unavailable or the OpenXR session is not running.
+				Returns the current predicted-display [code]XrTime[/code] as a signed 64-bit integer. This is an opaque value in the OpenXR runtime's clock domain. Meta Body Tracking must be enabled; returns [code]0[/code] until the current session has produced a successful live body location, when body tracking is unavailable, or when the OpenXR session is not running.
 				Do not compare or convert this value to Godot, Android, camera, or sensor timestamps unless the application has independently established that they share the same clock domain.
 			</description>
 		</method>
@@ -50,7 +50,7 @@
 			<return type="Dictionary" />
 			<param index="0" name="xr_time" type="int" />
 			<description>
-				Calls [code]xrLocateBodyJointsFB[/code] at the supplied raw [code]XrTime[/code], relative to the current OpenXR play space. Meta Body Tracking must be enabled. No interpolation or pose history is added by the plugin.
+				Calls [code]xrLocateBodyJointsFB[/code] at the supplied raw [code]XrTime[/code], relative to the current OpenXR play space. Meta Body Tracking must be enabled. Until the current session has produced a successful live body location, this method returns a structured unsuccessful result without calling the OpenXR runtime. This prevents application polling during runtime startup from issuing temporal native calls. No interpolation or pose history is added by the plugin.
 				The returned dictionary contains [code]requested_time[/code], [code]effective_time[/code], [code]success[/code], [code]error_code[/code], [code]error_string[/code], [code]is_active[/code], [code]confidence[/code], [code]skeleton_changed_count[/code], [code]body_tracking_supported[/code], [code]full_body_supported[/code], [code]joint_count[/code], and [code]joints[/code].
 				[code]joints[/code] is an array indexed by [XRBodyTracker.Joint], with the same Godot transform convention, orientation conversion, root-orientation correction, and shoulder-position correction as the live [XRBodyTracker] at [code]/user/body_tracker[/code]. For example, read the root at [code]result.joints[XRBodyTracker.JOINT_ROOT][/code]. Each populated joint contains [code]transform[/code] and separate [code]position_valid[/code], [code]orientation_valid[/code], [code]position_tracked[/code], and [code]orientation_tracked[/code] booleans. [code]joint_count[/code] is the number of populated canonical Godot joints, not a native OpenXR array length.
 				The timestamp, runtime status, capability, confidence, and per-joint validity metadata are additional to that familiar body pose. A successful call can still report an inactive body or invalid/untracked joints; callers must inspect the metadata.
@@ -60,7 +60,7 @@
 			<return type="Dictionary" />
 			<param index="0" name="xr_time" type="int" />
 			<description>
-				Calls [code]xrLocateSpace[/code] for an OpenXR view reference space at the supplied raw [code]XrTime[/code], relative to the current OpenXR play space. Meta Body Tracking must be enabled: this is the timestamped companion to the extension's canonical body pose, not a general-purpose HMD tracking API. No interpolation or pose history is added by the plugin.
+				Calls [code]xrLocateSpace[/code] for an OpenXR view reference space at the supplied raw [code]XrTime[/code], relative to the current OpenXR play space. Meta Body Tracking must be enabled. Until the current session has produced a successful live body location, this method returns a structured unsuccessful result without calling the OpenXR runtime. This is the timestamped companion to the extension's canonical body pose, not a general-purpose HMD tracking API. No interpolation or pose history is added by the plugin.
 				The returned dictionary contains [code]requested_time[/code], [code]success[/code], [code]error_code[/code], [code]error_string[/code], [code]transform[/code], raw [code]location_flags[/code], [code]position_valid[/code], [code]orientation_valid[/code], [code]position_tracked[/code], [code]orientation_tracked[/code], [code]linear_velocity[/code], [code]angular_velocity[/code], raw [code]velocity_flags[/code], [code]linear_velocity_valid[/code], and [code]angular_velocity_valid[/code]. A successful call can still return an invalid or untracked location; callers must inspect the metadata.
 			</description>
 		</method>

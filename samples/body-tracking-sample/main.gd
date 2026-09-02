@@ -42,7 +42,7 @@ func _update_temporal_location_probe(p_delta: float) -> void:
 
 	var current_time: int = OpenXRFbBodyTrackingExtension.get_predicted_display_time_raw()
 	if current_time == 0:
-		var unavailable_text := "Temporal raw XrTime probe: OpenXR session is not running"
+		var unavailable_text := "Temporal raw XrTime probe: waiting for a live body location or an OpenXR session"
 		viewport_2d_in_3d.get_scene_root().set_temporal_location_text(unavailable_text)
 		return
 

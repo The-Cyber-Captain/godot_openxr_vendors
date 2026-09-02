@@ -125,6 +125,8 @@ private:
 	XrBodyTrackerFB body_tracker = XR_NULL_HANDLE;
 	XrSpace view_space = XR_NULL_HANDLE;
 	bool time_location_functions_initialized = false;
+	bool body_tracking_location_ready = false;
+	XrResult body_tracking_location_result = XR_ERROR_INITIALIZATION_FAILED;
 
 	// Godot XRBodyTracker instance.
 	Ref<XRBodyTracker> xr_body_tracker;

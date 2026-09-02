@@ -332,6 +332,8 @@ void OpenXRFbBodyTrackingExtension::_on_session_created(uint64_t instance) {
 	if (!is_enabled()) {
 		return;
 	}
+	body_tracking_location_ready = false;
+	body_tracking_location_result = XR_ERROR_INITIALIZATION_FAILED;
 
 	if (time_location_functions_initialized) {
 		const XrReferenceSpaceCreateInfo create_info = {
@@ -375,6 +377,9 @@ void OpenXRFbBodyTrackingExtension::_on_session_created(uint64_t instance) {
 }
 
 void OpenXRFbBodyTrackingExtension::_on_session_destroyed() {
+	body_tracking_location_ready = false;
+	body_tracking_location_result = XR_ERROR_INITIALIZATION_FAILED;
+
 	if (body_tracker) {
 		const XrResult result = xrDestroyBodyTrackerFB(body_tracker);
 		if (XR_FAILED(result)) {
@@ -452,7 +457,13 @@ void OpenXRFbBodyTrackingExtension::_on_process() {
 
 	// Read the weights
 	XrResult result = xrLocateBodyJointsFB(body_tracker, &locate_info, &locations);
-	ERR_FAIL_COND_MSG(XR_FAILED(result), vformat("Failed to get body joint locations: %s", get_openxr_api()->get_error_string(result)));
+	body_tracking_location_result = result;
+	if (XR_FAILED(result)) {
+		body_tracking_location_ready = false;
+		xr_body_tracker->set_has_tracking_data(false);
+		return;
+	}
+	body_tracking_location_ready = true;
 
 	// Set the tracking active flag
 	xr_body_tracker->set_has_tracking_data(locations.isActive);
@@ -486,7 +497,7 @@ void OpenXRFbBodyTrackingExtension::_on_process() {
 }
 
 int64_t OpenXRFbBodyTrackingExtension::get_predicted_display_time_raw() {
-	if (!is_enabled() || !get_openxr_api().is_valid() || !get_openxr_api()->is_running()) {
+	if (!is_enabled() || !body_tracking_location_ready || !get_openxr_api().is_valid() || !get_openxr_api()->is_running()) {
 		return 0;
 	}
 
@@ -527,7 +538,16 @@ Dictionary OpenXRFbBodyTrackingExtension::locate_head_at_time_raw(int64_t p_xr_t
 	result["linear_velocity_valid"] = false;
 	result["angular_velocity_valid"] = false;
 
-	if (!is_enabled() || !time_location_functions_initialized || !view_space || !get_openxr_api().is_valid() || !get_openxr_api()->get_play_space()) {
+	if (!is_enabled()) {
+		return result;
+	}
+
+	if (!body_tracking_location_ready) {
+		set_query_error(result, body_tracking_location_result, "Temporal location is waiting for a successful live body location");
+		return result;
+	}
+
+	if (!time_location_functions_initialized || !view_space || !get_openxr_api().is_valid() || !get_openxr_api()->is_running() || !get_openxr_api()->get_play_space() || !SESSION) {
 		return result;
 	}
 
@@ -591,7 +611,16 @@ Dictionary OpenXRFbBodyTrackingExtension::locate_body_at_time_raw(int64_t p_xr_t
 	result["joint_count"] = 0;
 	result["joints"] = Array();
 
-	if (!is_enabled() || !body_tracker || !get_openxr_api().is_valid() || !get_openxr_api()->get_play_space()) {
+	if (!is_enabled()) {
+		return result;
+	}
+
+	if (!body_tracking_location_ready) {
+		set_query_error(result, body_tracking_location_result, "Temporal location is waiting for a successful live body location");
+		return result;
+	}
+
+	if (!body_tracker || !get_openxr_api().is_valid() || !get_openxr_api()->is_running() || !get_openxr_api()->get_play_space() || !SESSION) {
 		return result;
 	}
 

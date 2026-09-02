@@ -19,6 +19,7 @@ dest_files=["res://.godot/imported/Shoes.png-d48c1140e493e85c841ca1e0d8bc94b2.s3
 
 compress/mode=2
 compress/high_quality=false
+compress/high_quality_mode=0
 compress/lossy_quality=0.7
 compress/uastc_level=0
 compress/rdo_quality_loss=0.0

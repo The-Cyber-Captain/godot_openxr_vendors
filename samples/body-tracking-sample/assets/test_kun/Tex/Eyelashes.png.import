@@ -19,6 +19,7 @@ dest_files=["res://.godot/imported/Eyelashes.png-17be4cfc9cd02153d0ecc69f8ba53f2
 
 compress/mode=2
 compress/high_quality=false
+compress/high_quality_mode=0
 compress/lossy_quality=0.7
 compress/uastc_level=0
 compress/rdo_quality_loss=0.0
