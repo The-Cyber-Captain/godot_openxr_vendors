@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="OpenXRMonotonicTimeConversionExtension" inherits="OpenXRExtensionWrapper" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/godotengine/godot/master/doc/class.xsd">
+	<brief_description>
+		Converts Android suspend-excluding monotonic nanoseconds to OpenXR [code]XrTime[/code].
+	</brief_description>
+	<description>
+		Uses [code]XR_KHR_convert_timespec_time[/code] and the active OpenXR instance. On Android, [method get_android_uptime_nanos] returns the current [code]CLOCK_MONOTONIC[/code] value, equivalent to [code]SystemClock.uptimeNanos()[/code]. The conversion and source timeline both pause during deep sleep.
+
+		The integer sentinel [code]-1[/code] means unavailable, invalid, or failed. Conversion requires a positive input and an initialized OpenXR instance. No wall-clock, predicted-display, engine-relative, calibration, or background timing is used.
+	</description>
+	<methods>
+		<method name="is_monotonic_time_conversion_supported" qualifiers="const">
+			<return type="bool" />
+			<description>Returns true only when the extension is enabled for the active instance and its function pointer was resolved.</description>
+		</method>
+		<method name="get_android_uptime_nanos" qualifiers="const">
+			<return type="int" />
+			<description>Returns the current Android suspend-excluding monotonic timestamp in nanoseconds, or [code]-1[/code] when unavailable.</description>
+		</method>
+		<method name="monotonic_nanos_to_xr_time" qualifiers="const">
+			<return type="int" />
+			<param index="0" name="monotonic_nanos" type="int" />
+			<description>Converts the supplied monotonic timestamp without sampling it internally, or returns [code]-1[/code] on invalid input, overflow, unavailable OpenXR, or conversion failure.</description>
+		</method>
+	</methods>
+</class>
