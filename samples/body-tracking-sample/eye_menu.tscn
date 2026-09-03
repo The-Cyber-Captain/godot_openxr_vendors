@@ -61,5 +61,12 @@ unique_name_in_owner = true
 layout_mode = 2
 size_flags_vertical = 3
 
+[node name="TemporalLocationLabel" type="Label" parent="ColorRect/MarginContainer/VBoxContainer"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+theme_override_font_sizes/font_size = 12
+text = "Temporal location probe waiting for OpenXR..."
+
 [connection signal="pressed" from="ColorRect/MarginContainer/VBoxContainer/HBoxContainer/EyeGazeInteractionButton" to="." method="_on_eye_gaze_interaction_button_pressed"]
 [connection signal="pressed" from="ColorRect/MarginContainer/VBoxContainer/HBoxContainer/AndroidEyeTrackingButton" to="." method="_on_android_eye_tracking_button_pressed"]

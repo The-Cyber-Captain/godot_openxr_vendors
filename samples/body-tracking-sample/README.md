@@ -8,3 +8,7 @@ as well as face tracking, which is only supported on Quest Pro. For more Meta-sp
 # Screenshots
 
 ![Screenshot](screenshots/meta_body_tracking_screenshot_01.png)
+
+The in-headset UI also includes a developer-facing temporal-location smoke probe. It obtains the runtime's raw predicted-display `XrTime`, queries the head and Meta body pose at that exact value, and repeats the head/body queries for an earlier raw timestamp retained by the sample. Timestamped body joints use the same `XRBodyTracker.Joint` layout and Godot transforms as `/user/body_tracker`; the readout compares selected current-time joints with that live tracker, including pose deltas and validity/tracked-flag agreement. It also exposes call failures separately from inactive or invalid locations and valid tracked locations.
+
+The probe treats `XrTime` as an opaque OpenXR clock-domain value. It does not convert timestamps, match them to another sensor clock, or claim to validate historical-pose accuracy.

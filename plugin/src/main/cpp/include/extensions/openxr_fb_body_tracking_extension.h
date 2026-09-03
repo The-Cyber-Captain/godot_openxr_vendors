@@ -32,6 +32,7 @@
 #include <openxr/openxr.h>
 #include <godot_cpp/classes/open_xr_extension_wrapper.hpp>
 #include <godot_cpp/classes/xr_body_tracker.hpp>
+#include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 #include <map>
 
@@ -61,6 +62,9 @@ public:
 	static OpenXRFbBodyTrackingExtension *get_singleton();
 
 	bool is_enabled() const;
+	int64_t get_predicted_display_time_raw();
+	Dictionary locate_head_at_time_raw(int64_t p_xr_time);
+	Dictionary locate_body_at_time_raw(int64_t p_xr_time);
 
 	OpenXRFbBodyTrackingExtension();
 	~OpenXRFbBodyTrackingExtension();
@@ -69,6 +73,20 @@ protected:
 	static void _bind_methods();
 
 private:
+	EXT_PROTO_XRRESULT_FUNC3(xrCreateReferenceSpace,
+			(XrSession), session,
+			(const XrReferenceSpaceCreateInfo *), createInfo,
+			(XrSpace *), space);
+
+	EXT_PROTO_XRRESULT_FUNC1(xrDestroySpace,
+			(XrSpace), space);
+
+	EXT_PROTO_XRRESULT_FUNC4(xrLocateSpace,
+			(XrSpace), space,
+			(XrSpace), baseSpace,
+			(XrTime), time,
+			(XrSpaceLocation *), location);
+
 	EXT_PROTO_XRRESULT_FUNC3(xrCreateBodyTrackerFB,
 			(XrSession), session,
 			(const XrBodyTrackerCreateInfoFB *), createInfo,
@@ -83,6 +101,9 @@ private:
 			(XrBodyJointLocationsFB *), locations);
 
 	bool initialize_fb_body_tracking_extension(const XrInstance instance);
+	bool initialize_time_location_functions();
+	Dictionary create_query_result(int64_t p_xr_time) const;
+	void set_query_error(Dictionary &r_result, XrResult p_error, const String &p_context = String());
 
 	void cleanup();
 
@@ -102,6 +123,10 @@ private:
 
 	// XR_FB_body_tracking handle.
 	XrBodyTrackerFB body_tracker = XR_NULL_HANDLE;
+	XrSpace view_space = XR_NULL_HANDLE;
+	bool time_location_functions_initialized = false;
+	bool body_tracking_location_ready = false;
+	XrResult body_tracking_location_result = XR_ERROR_INITIALIZATION_FAILED;
 
 	// Godot XRBodyTracker instance.
 	Ref<XRBodyTracker> xr_body_tracker;
