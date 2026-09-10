@@ -97,6 +97,10 @@ env.Depends(library, raw_headers)
 Default(library)
 
 if env["platform"] == "android":
+    # XR_KHR_convert_timespec_time is guarded by this Khronos-header define.
+    # Set it globally because openxr_platform.h may be included by another
+    # extension before the monotonic-time extension header is reached.
+    env.Append(CPPDEFINES=["XR_USE_TIMESPEC"])
     android_target = "release" if env["target"] == "template_release" else "debug"
     android_arch = ""
     if env["arch"] == "arm64":

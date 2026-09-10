@@ -10,6 +10,7 @@ Features
     hybrid_apps
     body_tracking
     performance_metrics
+    monotonic_time_conversion
     meta/index
     androidxr/index
     openxr_validation_layers
