@@ -135,6 +135,7 @@
 #include "classes/openxr_ml_marker_understanding_manager.h"
 #include "classes/openxr_vendor_performance_metrics.h"
 #include "classes/openxr_vendor_performance_metrics_provider.h"
+#include "classes/openxr_vendor_device_info.h"
 
 using namespace godot;
 
@@ -522,7 +523,9 @@ void initialize_plugin_module(ModuleInitializationLevel p_level) {
 			GDREGISTER_CLASS(OpenXRMlMarkerUnderstandingManager);
 
 			GDREGISTER_CLASS(OpenXRHybridApp);
+			GDREGISTER_CLASS(OpenXRVendorDeviceInfo);
 			Engine::get_singleton()->register_singleton("OpenXRHybridApp", OpenXRHybridApp::get_singleton());
+			Engine::get_singleton()->register_singleton("OpenXRVendorDeviceInfo", OpenXRVendorDeviceInfo::get_singleton());
 
 			Engine::get_singleton()->register_singleton("OpenXRVendorPerformanceMetrics", OpenXRVendorPerformanceMetrics::get_singleton());
 		} break;
@@ -581,6 +584,9 @@ void terminate_plugin_module(ModuleInitializationLevel p_level) {
 
 			Engine::get_singleton()->unregister_singleton("OpenXRHybridApp");
 			memdelete(OpenXRHybridApp::get_singleton());
+
+			Engine::get_singleton()->unregister_singleton("OpenXRVendorDeviceInfo");
+			memdelete(OpenXRVendorDeviceInfo::get_singleton());
 
 			Engine::get_singleton()->unregister_singleton("OpenXRVendorPerformanceMetrics");
 			memdelete(OpenXRVendorPerformanceMetrics::get_singleton());

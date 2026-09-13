@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="OpenXRVendorDeviceInfo" inherits="Object" version="4.6">
+	<brief_description>
+		Provides the model and vendor-specific operating system identity of the active XR device.
+	</brief_description>
+	<description>
+		The Android library is built with one vendor flavor per export. This singleton therefore
+		provides one common API while the active vendor supplies the device-specific values.
+		[method get_device_info] returns a dictionary with the keys [code]model[/code], [code]os[/code],
+		and [code]os_version[/code]. Values are empty when the information is unavailable or when
+		the project is not running on Android.
+	</description>
+	<methods>
+		<method name="get_device_info">
+			<return type="Dictionary" />
+			<description>
+				Returns the device model and vendor OS identity. The OS version is intended for
+				comparison with the vendor's documented compatibility mapping; it must be treated
+				as an opaque vendor-defined string.
+			</description>
+		</method>
+	</methods>
+</class>

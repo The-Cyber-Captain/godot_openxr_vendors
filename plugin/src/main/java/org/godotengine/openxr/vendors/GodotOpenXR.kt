@@ -29,10 +29,12 @@
 
 package org.godotengine.openxr.vendors
 
+import android.os.Build
 import android.util.Log
 import org.godotengine.godot.Godot
 import org.godotengine.godot.GodotLib
 import org.godotengine.godot.plugin.GodotPlugin
+import org.godotengine.godot.plugin.UsedByGodot
 import org.godotengine.godot.utils.PermissionsUtil
 import org.godotengine.openxr.vendors.utils.*
 
@@ -133,6 +135,43 @@ class GodotOpenXR(godot: Godot?) : GodotPlugin(godot) {
 	}
 
 	override fun getPluginName() = "GodotOpenXR"
+
+	/** Returns the hardware model through the native Android bridge. */
+	@UsedByGodot
+	private fun getDeviceModel(): String = Build.MODEL
+
+	/** Returns the OS identity belonging to the selected vendor flavor. */
+	@UsedByGodot
+	private fun getDeviceOs(): String {
+		val os = when (BuildConfig.FLAVOR) {
+			META_VENDOR_NAME -> META_HORIZON_OS
+			PICO_VENDOR_NAME -> PICO_OS
+			ANDROID_XR_VENDOR_NAME -> ANDROID_XR_OS
+			LYNX_VENDOR_NAME -> "lynxos"
+			MAGICLEAP_VENDOR_NAME -> "magicleapos"
+			else -> "android"
+		}
+
+		return os
+	}
+
+	/** Returns the vendor OS version through the native Android bridge. */
+	@UsedByGodot
+	private fun getDeviceOsVersion(): String {
+		return when (BuildConfig.FLAVOR) {
+			META_VENDOR_NAME -> getMetaHorizonOsVersion()
+			else -> Build.DISPLAY.ifEmpty { Build.VERSION.RELEASE }
+		}
+	}
+
+	private fun getMetaHorizonOsVersion(): String {
+		return try {
+			val packageInfo = activity?.packageManager?.getPackageInfo("com.oculus.systemdriver", 0)
+			packageInfo?.versionName ?: Build.DISPLAY.ifEmpty { Build.VERSION.RELEASE }
+		} catch (_: Exception) {
+			Build.DISPLAY.ifEmpty { Build.VERSION.RELEASE }
+		}
+	}
 
 	override fun getPluginGDExtensionLibrariesPaths() = setOf("res://addons/godotopenxrvendors/plugin.gdextension")
 
