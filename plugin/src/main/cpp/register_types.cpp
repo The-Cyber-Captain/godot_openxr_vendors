@@ -133,9 +133,9 @@
 #include "classes/openxr_ml_marker_detector_upc_a_settings.h"
 #include "classes/openxr_ml_marker_tracker.h"
 #include "classes/openxr_ml_marker_understanding_manager.h"
+#include "classes/openxr_vendor_device_info.h"
 #include "classes/openxr_vendor_performance_metrics.h"
 #include "classes/openxr_vendor_performance_metrics_provider.h"
-#include "classes/openxr_vendor_device_info.h"
 
 using namespace godot;
 
